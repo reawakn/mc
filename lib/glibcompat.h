@@ -24,6 +24,10 @@ void g_queue_free_full (GQueue * queue, GDestroyNotify free_func);
 void g_queue_clear_full (GQueue * queue, GDestroyNotify free_func);
 #endif /* ! GLIB_CHECK_VERSION (2, 60, 0) */
 
+#if ! GLIB_CHECK_VERSION (2, 28, 0)
+gint64 g_get_real_time (void);
+#endif /* ! GLIB_CHECK_VERSION (2, 28, 0) */
+
 /*** inline functions ****************************************************************************/
 
 #endif /* MC_GLIBCOMPAT_H */

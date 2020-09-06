@@ -31,9 +31,15 @@
  */
 
 #include <config.h>
+
 #include <string.h>
 
 #include "global.h"
+
+#if ! GLIB_CHECK_VERSION (2, 28, 0)
+#include <sys/time.h>           /* gettimeofday() */
+#endif /* ! GLIB_CHECK_VERSION (2, 28, 0) */
+
 #include "glibcompat.h"
 
 /*** global variables ****************************************************************************/
@@ -158,5 +164,39 @@ g_queue_clear_full (GQueue * queue, GDestroyNotify free_func)
     g_queue_clear (queue);
 }
 #endif /* ! GLIB_CHECK_VERSION (2, 60, 0) */
+
+/* --------------------------------------------------------------------------------------------- */
+
+#if ! GLIB_CHECK_VERSION (2, 28, 0)
+/**
+ * g_get_real_time:
+ *
+ * Queries the system wall-clock time.
+ *
+ * This call is functionally equivalent to g_get_current_time() except
+ * that the return value is often more convenient than dealing with a
+ * #GTimeVal.
+ *
+ * You should only use this call if you are actually interested in the real
+ * wall-clock time.  g_get_monotonic_time() is probably more useful for
+ * measuring intervals.
+ *
+ * Returns: the number of microseconds since January 1, 1970 UTC.
+ *
+ * Since: 2.28
+ **/
+gint64
+g_get_real_time (void)
+{
+    struct timeval r;
+
+    /* this is required on alpha, there the timeval structs are ints
+     * not longs and a cast only would fail horribly */
+    gettimeofday (&r, NULL);
+
+    return (((gint64) r.tv_sec) * G_USEC_PER_SEC) + r.tv_usec;
+}
+
+#endif /* ! GLIB_CHECK_VERSION (2, 28, 0) */
 
 /* --------------------------------------------------------------------------------------------- */
