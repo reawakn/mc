@@ -106,8 +106,8 @@
 #include "lib/util.h"
 #include "lib/widget.h"
 
-#include "src/filemanager/layout.h"        /* setup_cmdline() */
-#include "src/filemanager/command.h"        /* cmdline */
+#include "src/filemanager/layout.h"     /* setup_cmdline() */
+#include "src/filemanager/command.h"    /* cmdline */
 
 #include "subshell.h"
 #include "internal.h"
@@ -201,8 +201,8 @@ static int subshell_ready;
 static gboolean use_persistent_buffer = FALSE;
 
 /* Flag to indicate if the contents of the subshell command line need to be cleared before */
-/* executing a command. This should only end up set to true if there is some sort of error.*/
-/* This allows us to recover gracefully from an error.*/
+/* executing a command. This should only end up set to true if there is some sort of error. */
+/* This allows us to recover gracefully from an error. */
 static gboolean subshell_should_clear_command_line = FALSE;
 
 /* This is the local variable where the subshell prompt is stored while we are working on it. */
@@ -392,8 +392,10 @@ init_subshell_child (const char *pty_name)
     dup2 (subshell_pty_slave, STDERR_FILENO);
 
     close (subshell_pipe[READ]);
-    if (use_persistent_buffer == TRUE)
+
+    if (use_persistent_buffer)
         close (command_buffer_pipe[READ]);
+
     close (subshell_pty_slave); /* These may be FD_CLOEXEC, but just in case... */
     /* Close master side of pty.  This is important; apart from */
     /* freeing up the descriptor for use in the subshell, it also       */
@@ -505,13 +507,15 @@ synchronize (void)
 /* transfer the contents to the panel command prompt. */
 
 static gboolean
-read_command_line_buffer(gboolean test_mode)
+read_command_line_buffer (gboolean test_mode)
 {
+    /* Make static to avoid allocation of large buffers in the stack each time */
+    static char subshell_command_buffer[BUF_LARGE];
+    static char subshell_cursor_buffer[BUF_SMALL];
+
     fd_set read_set;
     int i;
     ssize_t bytes;
-    char subshell_command_buffer[BUF_LARGE];
-    char subshell_cursor_buffer[BUF_SMALL];
     struct timeval subshell_prompt_timer = { 0, 0 };
     int command_buffer_length;
     int command_buffer_char_length;
@@ -520,130 +524,147 @@ read_command_line_buffer(gboolean test_mode)
     int rc;
     char *end;
 
-    if (use_persistent_buffer == TRUE)
+    if (!use_persistent_buffer)
+        return TRUE;
+
+    FD_ZERO (&read_set);
+    FD_SET (command_buffer_pipe[READ], &read_set);
+    maxfdp = command_buffer_pipe[READ];
+
+    /* First, flush the command buffer pipe. This pipe shouldn't be written
+     * to under normal circumstances, but if it somehow does get written
+     * to, we need to make sure to discard whatever data is there before
+     * we try to use it. */
+    while ((rc = select (maxfdp + 1, &read_set, NULL, NULL, &subshell_prompt_timer)) != 0)
     {
-        FD_ZERO (&read_set);
-        FD_SET (command_buffer_pipe[READ], &read_set);
-        maxfdp = command_buffer_pipe[READ];
-        /* First, flush the command buffer pipe. This pipe shouldn't be written
-         * to under normal circumstances, but if it somehow does get written
-         * to, we need to make sure to discard whatever data is there before
-         * we try to use it. */
-        while ((rc = select (maxfdp + 1, &read_set, NULL, NULL, &subshell_prompt_timer)) != 0)
+        if (rc == -1)
         {
-            if (rc == -1)
-            {
-                if (errno == EINTR)
-                    continue;
-                else
-                    return FALSE;
-            }
-            else if (rc == 1)
-                read (command_buffer_pipe[READ], subshell_command_buffer, sizeof(subshell_command_buffer));
-        }
-        /* get contents of command line buffer */
-        write_all (mc_global.tty.subshell_pty, ESC_STR SHELL_BUFFER_KEYBINDING,
-            sizeof(ESC_STR SHELL_CURSOR_KEYBINDING) - 1);
-        subshell_prompt_timer.tv_sec = 1;
-        FD_ZERO (&read_set);
-        FD_SET (command_buffer_pipe[READ], &read_set);
-        while ((rc = select (maxfdp + 1, &read_set, NULL, NULL, &subshell_prompt_timer)) != 1)
-        {
-            if (rc == -1)
-            {
-                if (errno == EINTR)
-                    continue;
-                else
-                    return FALSE;
-            }
-            else if (rc == 0)
-                return FALSE;
-        }
+            if (errno == EINTR)
+                continue;
 
-        bytes = read (command_buffer_pipe[READ], subshell_command_buffer, sizeof(subshell_command_buffer));
-        if (bytes == sizeof(subshell_command_buffer))
             return FALSE;
-        if (bytes == 0)
-            return FALSE;
-        subshell_command_buffer[bytes - 1] = 0;
-        command_buffer_char_length = bytes - 1;
-        command_buffer_length = str_length(subshell_command_buffer);
-
-        /* get cursor position */
-        write_all (mc_global.tty.subshell_pty, ESC_STR SHELL_CURSOR_KEYBINDING,
-            sizeof(ESC_STR SHELL_CURSOR_KEYBINDING) - 1);
-        subshell_prompt_timer.tv_sec = 1;
-        subshell_prompt_timer.tv_usec = 0;
-        FD_ZERO (&read_set);
-        FD_SET (command_buffer_pipe[READ], &read_set);
-        while ((rc = select (maxfdp + 1, &read_set, NULL, NULL, &subshell_prompt_timer)) != 1)
-        {
-            if (rc == -1)
-            {
-                if (errno == EINTR)
-                    continue;
-                else
-                    return FALSE;
-            }
-            else if (rc == 0)
-                return FALSE;
         }
-        bytes = read (command_buffer_pipe[READ], subshell_cursor_buffer, sizeof(subshell_cursor_buffer));
-        if (bytes == 0)
-            return FALSE;
-        subshell_cursor_buffer[bytes - 1] = 0;
-        cursor_position = strtol(subshell_cursor_buffer, &end, 10);
-        if (end == subshell_cursor_buffer)
-            return FALSE;
 
-        if (test_mode == TRUE)
-            return TRUE;
-        /* Erase non-text characters in the command buffer, such as tab, or newline, as this
-         * could cause problems. */
-        for(i = 0;i < command_buffer_char_length;i++)
+        if (rc == 1)
+            read (command_buffer_pipe[READ], subshell_command_buffer,
+                  sizeof (subshell_command_buffer));
+    }
+
+    /* get contents of command line buffer */
+    write_all (mc_global.tty.subshell_pty, ESC_STR SHELL_BUFFER_KEYBINDING,
+               sizeof (ESC_STR SHELL_CURSOR_KEYBINDING) - 1);
+
+    subshell_prompt_timer.tv_sec = 1;
+    FD_ZERO (&read_set);
+    FD_SET (command_buffer_pipe[READ], &read_set);
+
+    while ((rc = select (maxfdp + 1, &read_set, NULL, NULL, &subshell_prompt_timer)) != 1)
+    {
+        if (rc == -1)
         {
-            if ((unsigned char) subshell_command_buffer[i] < 32
-                || (unsigned char)subshell_command_buffer[i] == 127)
-                subshell_command_buffer[i] = ' ';
-        }
-        input_assign_text (cmdline, "");
-        input_insert (cmdline, subshell_command_buffer, 0);
+            if (errno == EINTR)
+                continue;
 
-        if (mc_global.shell->type == SHELL_BASH)
+            return FALSE;
+        }
+
+        if (rc == 0)
+            return FALSE;
+    }
+
+    bytes =
+        read (command_buffer_pipe[READ], subshell_command_buffer, sizeof (subshell_command_buffer));
+    if (bytes == 0 || bytes == sizeof (subshell_command_buffer))
+        return FALSE;
+
+    command_buffer_char_length = bytes - 1;
+    subshell_command_buffer[command_buffer_char_length] = '\0';
+    command_buffer_length = str_length (subshell_command_buffer);
+
+    /* get cursor position */
+    write_all (mc_global.tty.subshell_pty, ESC_STR SHELL_CURSOR_KEYBINDING,
+               sizeof (ESC_STR SHELL_CURSOR_KEYBINDING) - 1);
+
+    subshell_prompt_timer.tv_sec = 1;
+    subshell_prompt_timer.tv_usec = 0;
+    FD_ZERO (&read_set);
+    FD_SET (command_buffer_pipe[READ], &read_set);
+
+    while ((rc = select (maxfdp + 1, &read_set, NULL, NULL, &subshell_prompt_timer)) != 1)
+    {
+        if (rc == -1)
         {
-            /* We need to do this because bash gives the cursor position in a utf-8 string based
-             * on the location in bytes, not in unicode characters. */
-            for (i = 0;i < command_buffer_length;i++)
-                if (str_offset_to_pos(subshell_command_buffer, i) == cursor_position)
-                    break;
-            cursor_position = i;
-        }
-        if (cursor_position > command_buffer_length)
-            cursor_position = command_buffer_length;
-        cmdline->point = cursor_position;
-        /* We send any remaining data to STDOUT before we finish. */
-        flush_subshell(0, VISIBLY);
+            if (errno == EINTR)
+                continue;
 
-        /* Now we erase the current contents of the command line buffer */
-        if (mc_global.shell->type != SHELL_ZSH)
+            return FALSE;
+        }
+
+        if (rc == 0)
+            return FALSE;
+    }
+
+    bytes =
+        read (command_buffer_pipe[READ], subshell_cursor_buffer, sizeof (subshell_cursor_buffer));
+    if (bytes == 0)
+        return FALSE;
+
+    subshell_cursor_buffer[bytes - 1] = '\0';
+    cursor_position = strtol (subshell_cursor_buffer, &end, 10);
+    if (end == subshell_cursor_buffer)
+        return FALSE;
+
+    if (test_mode)
+        return TRUE;
+
+    /* Erase non-text characters in the command buffer, such as tab, or newline, as this
+     * could cause problems. */
+    for (i = 0; i < command_buffer_char_length; i++)
+        if ((unsigned char) subshell_command_buffer[i] < 32
+            || (unsigned char) subshell_command_buffer[i] == 127)
+            subshell_command_buffer[i] = ' ';
+
+    input_assign_text (cmdline, "");
+    input_insert (cmdline, subshell_command_buffer, FALSE);
+
+    if (mc_global.shell->type == SHELL_BASH)
+    {
+        /* We need to do this because bash gives the cursor position in a utf-8 string based
+         * on the location in bytes, not in unicode characters. */
+        for (i = 0; i < command_buffer_length; i++)
+            if (str_offset_to_pos (subshell_command_buffer, i) == cursor_position)
+                break;
+        cursor_position = i;
+    }
+    if (cursor_position > command_buffer_length)
+        cursor_position = command_buffer_length;
+    cmdline->point = cursor_position;
+    /* We send any remaining data to STDOUT before we finish. */
+    flush_subshell (0, VISIBLY);
+
+    /* Now we erase the current contents of the command line buffer */
+    if (mc_global.shell->type != SHELL_ZSH)
+    {
         /* In zsh, we can just press c-u to clear the line, without needing to go to the end of
          * the line first first. In all other shells, we must go to the end of the line first. */
+
+        /* If we are not at the end of the line, we go to the end. */
+        if (cursor_position != command_buffer_length)
         {
-            /* If we are not at the end of the line, we go to the end. */
-            if (cursor_position != command_buffer_length)
-            {
-                write_all (mc_global.tty.subshell_pty, "\005", 1);
-                if (flush_subshell(1, VISIBLY) != 1)
-                    return FALSE;
-            }
-        }
-        if (command_buffer_length > 0)    /* Now we clear the line. */
-        {
-            write_all (mc_global.tty.subshell_pty, "\025", 1);
-            if (flush_subshell(1, VISIBLY) != 1)
+            write_all (mc_global.tty.subshell_pty, "\005", 1);
+            if (flush_subshell (1, VISIBLY) != 1)
                 return FALSE;
         }
     }
+
+    if (command_buffer_length > 0)
+    {
+        /* Now we clear the line. */
+        write_all (mc_global.tty.subshell_pty, "\025", 1);
+        if (flush_subshell (1, VISIBLY) != 1)
+            return FALSE;
+    }
+
     return TRUE;
 }
 
@@ -652,7 +673,7 @@ read_command_line_buffer(gboolean test_mode)
 static void
 clear_subshell_prompt_string (void)
 {
-    if(subshell_prompt_temp_buffer != NULL)
+    if (subshell_prompt_temp_buffer != NULL)
         g_string_set_size (subshell_prompt_temp_buffer, 0);
 }
 
@@ -665,20 +686,14 @@ parse_subshell_prompt_string (const char *buffer, int bytes)
 
     /* First time through */
     if (subshell_prompt == NULL)
-    {
         subshell_prompt = g_string_sized_new (INITIAL_PROMPT_SIZE);
-    }
     if (subshell_prompt_temp_buffer == NULL)
-    {
         subshell_prompt_temp_buffer = g_string_sized_new (INITIAL_PROMPT_SIZE);
-    }
 
     /* Extract the prompt from the shell output */
     for (i = 0; i < bytes; i++)
         if (buffer[i] == '\n' || buffer[i] == '\r')
-        {
             g_string_set_size (subshell_prompt_temp_buffer, 0);
-        }
         else if (buffer[i] != '\0')
             g_string_append_c (subshell_prompt_temp_buffer, buffer[i]);
 }
@@ -691,7 +706,7 @@ set_prompt_string (void)
     if (subshell_prompt_temp_buffer->len != 0)
         g_string_assign (subshell_prompt, subshell_prompt_temp_buffer->str);
 
-    setup_cmdline();
+    setup_cmdline ();
 }
 
 /* --------------------------------------------------------------------------------------------- */
@@ -778,11 +793,9 @@ feed_subshell (int how, gboolean fail_on_error)
 
             if (how == VISIBLY)
                 write_all (STDOUT_FILENO, pty_buffer, bytes);
-            if (should_read_new_subshell_prompt == TRUE)
-            {
-                parse_subshell_prompt_string(pty_buffer, bytes);
-            }
 
+            if (should_read_new_subshell_prompt)
+                parse_subshell_prompt_string (pty_buffer, bytes);
         }
 
         else if (FD_ISSET (subshell_pipe[READ], &read_set))
@@ -797,11 +810,11 @@ feed_subshell (int how, gboolean fail_on_error)
                 exit (EXIT_FAILURE);
             }
 
-            subshell_cwd[bytes - 1] = 0;        /* Squash the final '\n' */
+            subshell_cwd[bytes - 1] = '\0';     /* Squash the final '\n' */
 
             synchronize ();
 
-            clear_subshell_prompt_string();
+            clear_subshell_prompt_string ();
             should_read_new_subshell_prompt = TRUE;
             subshell_ready = TRUE;
             if (subshell_state == RUNNING_COMMAND)
@@ -828,22 +841,20 @@ feed_subshell (int how, gboolean fail_on_error)
                 if (pty_buffer[i] == subshell_switch_key)
                 {
                     write_all (mc_global.tty.subshell_pty, pty_buffer, i);
+
                     if (subshell_ready)
                     {
                         subshell_state = INACTIVE;
                         set_prompt_string ();
-                        if (subshell_ready == TRUE)
+                        if (subshell_ready && !read_command_line_buffer (FALSE))
                         {
-                            if (!read_command_line_buffer(FALSE))
-                            {
-                                /* If we got here, some unforseen error must have occurred. */
-                                flush_subshell(0, VISIBLY);
-                                input_assign_text (cmdline, "");
-                                subshell_should_clear_command_line = TRUE;
-                                return TRUE;
-                            }
+                            /* If we got here, some unforseen error must have occurred. */
+                            flush_subshell (0, VISIBLY);
+                            input_assign_text (cmdline, "");
+                            subshell_should_clear_command_line = TRUE;
                         }
                     }
+
                     return TRUE;
                 }
 
@@ -853,7 +864,7 @@ feed_subshell (int how, gboolean fail_on_error)
             {
                 /* We should only clear the command line if we are using a shell that works
                  * with persistent command buffer, otherwise we get awkward results. */
-                if (use_persistent_buffer == TRUE)
+                if (use_persistent_buffer)
                     input_assign_text (cmdline, "");
                 subshell_ready = FALSE;
             }
@@ -1302,24 +1313,21 @@ init_subshell (void)
                 return;
             }
         }
-        else if (pipe (subshell_pipe))  /* subshell_type is BASH, ASH_BUSYBOX, DASH or ZSH */
+        else if (pipe (subshell_pipe) != 0)     /* subshell_type is BASH, ASH_BUSYBOX, DASH or ZSH */
         {
             perror (__FILE__ ": couldn't create pipe");
             mc_global.tty.use_subshell = FALSE;
             return;
         }
-        if (mc_global.shell->type == SHELL_BASH
-            || mc_global.shell->type == SHELL_ZSH
+
+        if (mc_global.shell->type == SHELL_BASH || mc_global.shell->type == SHELL_ZSH
             || mc_global.shell->type == SHELL_FISH)
             use_persistent_buffer = TRUE;
-        if (use_persistent_buffer == TRUE)
+        if (use_persistent_buffer && pipe (command_buffer_pipe) != 0)
         {
-            if (pipe (command_buffer_pipe))
-            {
-                perror (__FILE__ ": couldn't create pipe");
-                mc_global.tty.use_subshell = FALSE;
-                return;
-            }
+            perror (__FILE__ ": couldn't create pipe");
+            mc_global.tty.use_subshell = FALSE;
+            return;
         }
     }
 
@@ -1342,6 +1350,7 @@ init_subshell (void)
         /* We are in the child process */
         init_subshell_child (pty_name);
     }
+
     init_subshell_precmd (precmd, BUF_MEDIUM);
 
     write_all (mc_global.tty.subshell_pty, precmd, strlen (precmd));
@@ -1351,9 +1360,7 @@ init_subshell (void)
     subshell_state = RUNNING_COMMAND;
     tty_enable_interrupt_key ();
     if (!feed_subshell (QUIETLY, TRUE))
-    {
         mc_global.tty.use_subshell = FALSE;
-    }
     tty_disable_interrupt_key ();
     if (!subshell_alive)
         mc_global.tty.use_subshell = FALSE;     /* Subshell died instantly, so don't use it */
@@ -1362,11 +1369,8 @@ init_subshell (void)
      * assume there must be something wrong with the shell, and we turn persistent buffer off
      * for good. This will save the user the trouble of having to wait for the persistent
      * buffer function to time out every time they try to close the subshell. */
-    if (use_persistent_buffer == TRUE)
-    {
-        if (read_command_line_buffer(TRUE) == FALSE)
-            use_persistent_buffer = FALSE;
-    }
+    if (use_persistent_buffer && !read_command_line_buffer (TRUE))
+        use_persistent_buffer = FALSE;
 }
 
 /* --------------------------------------------------------------------------------------------- */
@@ -1374,7 +1378,6 @@ init_subshell (void)
 int
 invoke_subshell (const char *command, int how, vfs_path_t ** new_dir_vpath)
 {
-    size_t i;
     /* Make the MC terminal transparent */
     tcsetattr (STDOUT_FILENO, TCSANOW, &raw_mode);
 
@@ -1391,23 +1394,25 @@ invoke_subshell (const char *command, int how, vfs_path_t ** new_dir_vpath)
             /* FIXME: possibly take out this hack; the user can re-play it by hitting C-hyphen a few times! */
             if (subshell_ready && mc_global.mc_run_mode == MC_RUN_FULL)
                 write_all (mc_global.tty.subshell_pty, " \b", 2);       /* Hack to make prompt reappear */
- 
-            if (use_persistent_buffer == TRUE)
+
+            if (use_persistent_buffer)
             {
+                size_t i;
+                int x;
+
                 /* Check to make sure there are no non text characters in the command buffer,
                  * such as tab, or newline, as this could cause problems. */
-                for(i = 0;i < strlen(cmdline->buffer);i++)
-                {
+                for (i = 0; cmdline->buffer[i] != '\0'; i++)
                     if ((unsigned char) cmdline->buffer[i] < 32
-                        || (unsigned char)cmdline->buffer[i] == 127)
+                        || (unsigned char) cmdline->buffer[i] == 127)
                         cmdline->buffer[i] = ' ';
-                }
 
                 /* Write the command buffer to the subshell. */
                 write_all (mc_global.tty.subshell_pty, cmdline->buffer, strlen (cmdline->buffer));
 
                 /* Put the cursor in the correct place in the subshell. */
-                for (int j = 0;j < str_length (cmdline->buffer) - cmdline->point;j++)
+                x = str_length (cmdline->buffer) - cmdline->point;
+                for (i = 0; i < x; i++)
                     write_all (mc_global.tty.subshell_pty, ESC_STR "[D", 3);
             }
         }
@@ -1418,7 +1423,7 @@ invoke_subshell (const char *command, int how, vfs_path_t ** new_dir_vpath)
         /* data is there, but only if we are using one of the shells that */
         /* doesn't support keeping command buffer contents, OR if there was */
         /* some sort of error. */
-        if (use_persistent_buffer == FALSE || subshell_should_clear_command_line == TRUE)
+        if (!use_persistent_buffer || subshell_should_clear_command_line)
         {
             write_all (mc_global.tty.subshell_pty, "\003", 1);
             subshell_state = RUNNING_COMMAND;
@@ -1427,6 +1432,7 @@ invoke_subshell (const char *command, int how, vfs_path_t ** new_dir_vpath)
             if (mc_global.shell->type != SHELL_FISH)
                 feed_subshell (QUIETLY, FALSE);
         }
+
         if (how == QUIETLY)
             write_all (mc_global.tty.subshell_pty, " ", 1);
         /* FIXME: if command is long (>8KB ?) we go comma */
@@ -1462,7 +1468,7 @@ flush_subshell (int max_wait_length, int how)
     int rc = 0;
     ssize_t bytes = 0;
     struct timeval timeleft = { 0, 0 };
-    int return_value = FALSE;
+    gboolean return_value = FALSE;
     fd_set tmp;
 
     timeleft.tv_sec = max_wait_length;
@@ -1486,6 +1492,7 @@ flush_subshell (int max_wait_length, int how)
             fprintf (stderr, "select (FD_SETSIZE, &tmp...): %s\r\n", unix_error_string (errno));
             exit (EXIT_FAILURE);
         }
+
         return_value = TRUE;
         timeleft.tv_sec = 0;
         timeleft.tv_usec = 0;
@@ -1494,6 +1501,7 @@ flush_subshell (int max_wait_length, int how)
         if (how == VISIBLY)
             write_all (STDOUT_FILENO, pty_buffer, bytes);
     }
+
     return return_value;
 }
 
@@ -1505,8 +1513,8 @@ read_subshell_prompt (void)
     int rc = 0;
     ssize_t bytes = 0;
     struct timeval timeleft = { 0, 0 };
-    int should_reset_prompt = TRUE;
-    int got_new_prompt = FALSE;
+    gboolean should_reset_prompt = TRUE;
+    gboolean got_new_prompt = FALSE;
 
     fd_set tmp;
     FD_ZERO (&tmp);
@@ -1534,15 +1542,15 @@ read_subshell_prompt (void)
         if (should_reset_prompt)
         {
             should_reset_prompt = FALSE;
-            clear_subshell_prompt_string();
+            clear_subshell_prompt_string ();
         }
+
         parse_subshell_prompt_string (pty_buffer, bytes);
         got_new_prompt = TRUE;
     }
-    if (got_new_prompt == TRUE)
-    {
+
+    if (got_new_prompt)
         set_prompt_string ();
-    }
 
     return (rc != 0 || bytes != 0);
 }
@@ -1616,7 +1624,7 @@ do_subshell_chdir (const vfs_path_t * vpath, gboolean update_prompt)
 
     /* If we are using a shell that doesn't support persistent command buffer, we need to clear
      * the command prompt before we send the cd command. */
-    if (use_persistent_buffer == FALSE || subshell_should_clear_command_line == TRUE)
+    if (!use_persistent_buffer || subshell_should_clear_command_line)
     {
         write_all (mc_global.tty.subshell_pty, "\003", 1);
         subshell_state = RUNNING_COMMAND;
